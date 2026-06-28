@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stream Resolver</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f0f0f; color: #e0e0e0; font-family: 'Segoe UI', monospace; min-height: 100vh; padding: 20px; }
+  h1 { text-align: center; color: #7c6aff; margin-bottom: 24px; font-size: 1.6rem; letter-spacing: 2px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 24px; }
+  input { background: #1a1a2e; border: 1px solid #333; color: #e0e0e0; padding: 10px 14px; border-radius: 8px; font-size: 0.95rem; outline: none; }
+  input:focus { border-color: #7c6aff; }
+  button { background: #7c6aff; color: #fff; border: none; padding: 10px 24px; border-radius: 8px; cursor: pointer; font-size: 0.95rem; font-weight: 600; transition: background 0.2s; }
+  button:hover { background: #5a48d4; }
+  button:disabled { background: #444; cursor: not-allowed; }
+  #log { background: #111; border: 1px solid #222; border-radius: 10px; padding: 16px; min-height: 80px; font-size: 0.82rem; line-height: 1.7; white-space: pre-wrap; word-break: break-all; margin-bottom: 20px; max-height: 300px; overflow-y: auto; }
+  .results { display: flex; flex-direction: column; gap: 14px; }
+  .track-card { background: #161625; border: 1px solid #2a2a3d; border-radius: 10px; padding: 14px 18px; }
+  .track-title { font-weight: 700; color: #7c6aff; margin-bottom: 10px; font-size: 0.95rem; }
+  .stream-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; border-bottom: 1px solid #1e1e30; flex-wrap: wrap; }
+  .stream-row:last-child { border-bottom: none; }
+  .stream-url { font-size: 0.78rem; color: #a0d4ff; flex: 1; word-break: break-all; }
+  .copy-btn { background: #2a2a3d; color: #ccc; border: none; border-radius: 5px; padding: 4px 10px; font-size: 0.72rem; cursor: pointer; white-space: nowrap; }
+  .copy-btn:hover { background: #7c6aff; color: #fff; }
+  .err  { color: #ff6d6d; }
+  .ok   { color: #6dff6d; }
+  .warn { color: #ffb86c; }
+  .proxy-status { text-align: center; font-size: 0.75rem; color: #555; margin-bottom: 14px; }
+  .proxy-status span { color: #7c6aff; }
+  .summary { text-align: center; color: #aaa; font-size: 0.85rem; margin-bottom: 10px; }
+  .raw-block { background: #0d0d1a; border-radius: 6px; padding: 10px; font-size: 0.75rem; color: #8be9fd; white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<h1>⚡ Stream Resolver</h1>
+
+<div class="controls">
+  <input id="imdbId" placeholder="IMDb ID (e.g. tt0800369)" value="tt0800369" style="width:220px"/>
+  <button id="resolveBtn" onclick="resolve()">Resolve</button>
+  <button onclick="clearAll()" style="background:#333">Clear</button>
+</div>
+
+<div class="proxy-status" id="proxyStatus">Proxy: <span>not tested</span></div>
+<div id="log">Ready. Enter an IMDb ID and click Resolve.</div>
+<div class="summary" id="summary"></div>
+<div class="results" id="results"></div>
+
+<script src="resolver.js"></script>
+</body>
+</html>
