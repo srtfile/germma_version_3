@@ -12,6 +12,8 @@ const PROXY_LIST = [
 ];
 
 let activeProxy = null;
+let csrfToken   = null;
+let pageReferer = null;
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 function log(msg, cls = "") {
@@ -36,16 +38,19 @@ function clearAll() {
   document.getElementById("log").textContent = "Ready.";
   document.getElementById("results").innerHTML = "";
   document.getElementById("summary").textContent = "";
-  activeProxy = null;
+  activeProxy  = null;
+  csrfToken    = null;
+  pageReferer  = null;
   setProxyStatus("not tested", "#555");
 }
 
-// ── Fetch via active proxy ────────────────────────────────────────────────────
-async function proxyFetch(url, options = {}) {
-  const wrapped = activeProxy.wrap(url);
-  const res = await fetch(wrapped, { signal: AbortSignal.timeout(14000), ...options });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res;
+// ── Try base64 decode ─────────────────────────────────────────────────────────
+function tryBase64(text) {
+  try {
+    const decoded = atob(text.trim());
+    if (["{", "[", "#", "h"].includes(decoded[0])) return decoded;
+  } catch (_) {}
+  return text;
 }
 
 // ── Proxy negotiation ─────────────────────────────────────────────────────────
@@ -54,14 +59,16 @@ async function findProxy(testUrl) {
   for (const proxy of PROXY_LIST) {
     log(`  Trying proxy: ${proxy.name} ...`, "warn");
     try {
-      const res = await fetch(proxy.wrap(testUrl), { signal: AbortSignal.timeout(9000) });
+      const res = await fetch(proxy.wrap(testUrl), {
+        signal: AbortSignal.timeout(10000),
+      });
       if (res.ok) {
         const text = await res.text();
         if (text.length > 100) {
           activeProxy = proxy;
           setProxyStatus(`✓ ${proxy.name}`, "#6dff6d");
           log(`  ✓ Using proxy: ${proxy.name}\n`, "ok");
-          return true;
+          return text; // return page HTML directly
         }
       }
       log(`  ✗ ${proxy.name} — bad response`, "err");
@@ -71,33 +78,77 @@ async function findProxy(testUrl) {
   }
   setProxyStatus("✗ all proxies failed", "#ff6d6d");
   log(`\n  ✗ All proxies failed.\n`, "err");
-  return false;
+  return null;
 }
 
-// ── Flatten nested objects/arrays to find items with .file ────────────────────
+// ── GET via proxy (with optional headers injected as query params) ─────────────
+async function proxyGet(url) {
+  const res = await fetch(activeProxy.wrap(url), {
+    signal: AbortSignal.timeout(14000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.text();
+}
+
+// ── POST-as-GET: append token to URL as query param fallback ──────────────────
+async function fetchPlaylist(url) {
+  // Strategy 1: plain GET via proxy (token already in URL usually)
+  try {
+    const text = await proxyGet(url);
+    if (text && text.length > 10) return tryBase64(text);
+  } catch (e) {
+    log(`    GET failed: ${e.message} — trying with token param...`, "warn");
+  }
+
+  // Strategy 2: append token as query param
+  try {
+    const sep = url.includes("?") ? "&" : "?";
+    const urlWithToken = `${url}${sep}_token=${encodeURIComponent(csrfToken)}`;
+    const text = await proxyGet(urlWithToken);
+    if (text && text.length > 10) return tryBase64(text);
+  } catch (e) {
+    log(`    token-param GET failed: ${e.message}`, "warn");
+  }
+
+  // Strategy 3: try next proxies in list for this specific URL
+  for (const proxy of PROXY_LIST) {
+    if (proxy.name === activeProxy.name) continue;
+    try {
+      log(`    retrying with proxy: ${proxy.name}`, "warn");
+      const res = await fetch(proxy.wrap(url), { signal: AbortSignal.timeout(12000) });
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.length > 10) return tryBase64(text);
+      }
+    } catch (_) {}
+  }
+
+  throw new Error("all strategies exhausted");
+}
+
+// ── Flatten nested objects/arrays ─────────────────────────────────────────────
 function flatten(obj) {
   if (Array.isArray(obj)) return obj.flatMap(flatten);
   if (obj && typeof obj === "object") return [obj];
   return [];
 }
 
-// ── Render a track card ───────────────────────────────────────────────────────
+// ── Render card ───────────────────────────────────────────────────────────────
 function renderCard(lang, content) {
   const wrap = document.getElementById("results");
   const card = document.createElement("div");
   card.className = "track-card";
 
-  // Try to detect m3u8 lines
   const lines = content.split("\n").filter(l => l.trim().startsWith("http"));
   let inner = "";
   if (lines.length > 0) {
     inner = lines.map(u => `
       <div class="stream-row">
         <span class="stream-url">${escHtml(u.trim())}</span>
-        <button class="copy-btn" onclick="copyUrl('${escHtml(u.trim())}')">Copy</button>
+        <button class="copy-btn" onclick="copyUrl(this, '${escHtml(u.trim())}')">Copy</button>
       </div>`).join("");
   } else {
-    inner = `<div class="raw-block">${escHtml(content.slice(0, 1000))}</div>`;
+    inner = `<div class="raw-block">${escHtml(content.slice(0, 2000))}</div>`;
   }
 
   card.innerHTML = `<div class="track-title">[${escHtml(lang)}]</div>${inner}`;
@@ -105,8 +156,10 @@ function renderCard(lang, content) {
   return lines.length;
 }
 
-function copyUrl(url) {
+function copyUrl(btn, url) {
   navigator.clipboard.writeText(url).catch(() => prompt("Copy:", url));
+  btn.textContent = "✓";
+  setTimeout(() => btn.textContent = "Copy", 1500);
 }
 
 // ── Main resolve ──────────────────────────────────────────────────────────────
@@ -119,84 +172,46 @@ async function resolve() {
   document.getElementById("summary").textContent = "";
   document.getElementById("log").textContent     = "";
 
-  const referer = `${BASE}/play/${imdbId}`;
+  pageReferer = `${BASE}/play/${imdbId}`;
 
-  // Step 1 — find proxy
-  if (!activeProxy) {
-    const ok = await findProxy(referer);
-    if (!ok) {
-      document.getElementById("resolveBtn").disabled = false;
-      return;
-    }
-  }
-
-  // Step 2 — fetch page HTML
-  log(`Fetching page: ${referer}\n`);
-  let html;
-  try {
-    const res = await proxyFetch(referer);
-    html = await res.text();
-    log(`  ✓ Page fetched (${html.length} bytes)`, "ok");
-  } catch (e) {
-    log(`  ✗ Page fetch failed: ${e.message}`, "err");
+  // Step 1 — fetch page + find proxy simultaneously
+  log(`Fetching page: ${pageReferer}\n`);
+  const html = await findProxy(pageReferer);
+  if (!html) {
     document.getElementById("resolveBtn").disabled = false;
     return;
   }
+  log(`  ✓ Page fetched (${html.length} bytes)`, "ok");
 
-  // Step 3 — extract p3 config
-  const cfgMatch = html.match(/let\s+p3\s*=\s*(\{.+?\});/s);
+  // Step 2 — extract p3 config
+  const cfgMatch = html.match(/let\s+p3\s*=\s*(\{[\s\S]+?\});/);
   if (!cfgMatch) {
-    log(`  ✗ p3 config not found in page HTML.`, "err");
-    log(`\nRaw page snippet:\n${html.slice(0, 500)}`, "warn");
+    log(`  ✗ p3 config not found.`, "err");
+    log(`\nPage snippet:\n${html.slice(0, 800)}`, "warn");
     document.getElementById("resolveBtn").disabled = false;
     return;
   }
 
   let cfg;
-  try {
-    cfg = JSON.parse(cfgMatch[1]);
-  } catch (e) {
-    log(`  ✗ Failed to parse p3 config: ${e.message}`, "err");
+  try { cfg = JSON.parse(cfgMatch[1]); }
+  catch (e) {
+    log(`  ✗ Failed to parse p3: ${e.message}`, "err");
     document.getElementById("resolveBtn").disabled = false;
     return;
   }
 
-  const token   = cfg.key;
+  csrfToken      = cfg.key;
   const filePath = cfg.file;
-  log(`  ✓ Token:  ${token.slice(0, 30)}...`, "ok");
+  log(`  ✓ Token:  ${csrfToken.slice(0, 30)}...`, "ok");
   log(`  ✓ File:   ${filePath.slice(0, 60)}...`, "ok");
 
-  // Step 4 — POST helper
-  async function post(url) {
-    const proxied = activeProxy.wrap(url);
-    const res = await fetch(proxied, {
-      method: "POST",
-      headers: {
-        "X-CSRF-Token":  token,
-        "Referer":       referer,
-        "Origin":        BASE,
-        "Content-Type":  "application/x-www-form-urlencoded",
-      },
-      body: "",
-      signal: AbortSignal.timeout(14000),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    // try base64 decode
-    try {
-      const decoded = atob(text.trim());
-      if (["{","[","#","h"].includes(decoded[0])) return decoded;
-    } catch (_) {}
-    return text;
-  }
-
-  // Step 5 — fetch track list
+  // Step 3 — fetch track list
   log(`\nFetching track list...`);
   let tracks;
   try {
-    const rawStr = await post(filePath);
-    const rawTracks = JSON.parse(rawStr);
-    tracks = flatten(rawTracks).filter(t => t.file);
+    const rawStr  = await fetchPlaylist(filePath);
+    const rawData = JSON.parse(rawStr);
+    tracks = flatten(rawData).filter(t => t.file);
     log(`  ✓ ${tracks.length} track(s) found`, "ok");
   } catch (e) {
     log(`  ✗ Track list failed: ${e.message}`, "err");
@@ -204,7 +219,7 @@ async function resolve() {
     return;
   }
 
-  // Step 6 — fetch each playlist
+  // Step 4 — fetch each playlist
   let totalUrls = 0;
   for (const t of tracks) {
     const fp   = String(t.file || "");
@@ -212,12 +227,12 @@ async function resolve() {
     const pl   = fp.startsWith("~") ? fp.slice(1) + ".txt" : fp;
     const plUrl = `${BASE}/playlist/${encodeURIComponent(pl)}`;
 
-    log(`\nFetching playlist [${lang}]: ${pl.slice(0, 60)}...`);
+    log(`\nFetching [${lang}]: ${pl.slice(0, 60)}...`);
     try {
-      const raw = await post(plUrl);
-      log(`  ✓ Got ${raw.length} bytes`, "ok");
+      const raw   = await fetchPlaylist(plUrl);
       const count = renderCard(lang, raw.trim());
-      totalUrls += count;
+      totalUrls  += count;
+      log(`  ✓ ${count} URL(s)`, "ok");
     } catch (e) {
       log(`  ✗ [${lang}] failed: ${e.message}`, "err");
     }
@@ -225,6 +240,6 @@ async function resolve() {
 
   log(`\nDone — ${totalUrls} stream URL(s) found`);
   document.getElementById("summary").textContent =
-    `✓ ${totalUrls} stream URL(s) across ${tracks.length} track(s)  |  proxy: ${activeProxy.name}`;
+    `✓ ${totalUrls} stream URL(s) across ${tracks.length} track(s)  |  proxy: ${activeProxy?.name}`;
   document.getElementById("resolveBtn").disabled = false;
 }
